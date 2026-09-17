@@ -38,7 +38,7 @@ jobs:
           NODE
           )"
           corepack enable
-          pnpm dlx "${sdk}" bootstrap
+          pnpm dlx --allow-build=esbuild --allow-build=workerd "${sdk}" bootstrap
       - name: Build and deploy applets
         shell: bash
         env:
