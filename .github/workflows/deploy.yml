@@ -1,0 +1,138 @@
+name: Deploy Hitch applets
+
+on:
+  workflow_call:
+    inputs:
+      hitch_url:
+        description: Hitch application origin
+        required: false
+        type: string
+        default: https://app.hitch42.com
+
+permissions: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: hitch-applets-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
+      - name: Restore workspace support
+        run: |
+          sdk="$(
+            node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+          const source = readFileSync("hitch.config.ts", "utf8");
+          const match = source.match(/^\s*sdk:\s*["']([^"']+)["']\s*,?\s*$/m);
+          if (!match) throw new Error("hitch.config.ts must contain a string sdk field.");
+          process.stdout.write(match[1]);
+          NODE
+          )"
+          corepack enable
+          pnpm dlx "${sdk}" bootstrap
+      - name: Build and deploy applets
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HITCH_URL: ${{ inputs.hitch_url }}
+        run: |
+          set -euo pipefail
+
+          hitch_url="${HITCH_URL%/}"
+
+          oidc_token() {
+            curl --fail-with-body --silent --show-error --get \
+              --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              --data-urlencode "audience=${hitch_url}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}" | jq -er '.value'
+          }
+
+          production_sha() {
+            encoded_ref="$(jq -rn --arg ref "${GITHUB_REF_NAME}" '$ref | @uri')"
+            curl --fail-with-body --silent --show-error \
+              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/commits/${encoded_ref}" |
+              jq -er '.sha'
+          }
+
+          mapfile -d '' applet_manifests < <(
+            find applets -mindepth 2 -maxdepth 2 -type f -name applet.manifest.ts -print0 | sort -z
+          )
+          if (( ${#applet_manifests[@]} == 0 )); then
+            echo "No applets were found under applets/." >&2
+            exit 1
+          fi
+
+          index=0
+          for applet_manifest in "${applet_manifests[@]}"; do
+            source_directory="${applet_manifest%/applet.manifest.ts}"
+            input_file="${RUNNER_TEMP}/hitch-inputs-${index}.json"
+            openapi_file="${RUNNER_TEMP}/hitch-openapi-${index}.json"
+            theme_file="${RUNNER_TEMP}/hitch-theme-${index}.css"
+            bundle_file="${RUNNER_TEMP}/hitch-bundle-${index}.tar.gz"
+
+            input_status="$(
+              jq -n --arg source_directory "${source_directory}" '{source_directory: $source_directory}' |
+                curl --silent --show-error \
+                  --header "Authorization: Bearer $(oidc_token)" \
+                  --header "Content-Type: application/json" \
+                  --data-binary @- \
+                  --output "${input_file}" \
+                  --write-out '%{http_code}' \
+                  "${hitch_url}/api/ci/v1/build-inputs"
+            )"
+            if [[ "${input_status}" == "404" ]] &&
+              [[ "$(jq -r '.code // empty' "${input_file}")" == "github_source_not_linked" ]]; then
+              echo "Skip ${source_directory}: it is not linked to a Hitch applet."
+              index=$((index + 1))
+              continue
+            fi
+            if [[ "${input_status}" != "200" ]]; then
+              cat "${input_file}" >&2
+              exit 1
+            fi
+
+            applet_code="$(jq -er '.code | select(test("^[a-z][a-z0-9]*(_[a-z0-9]+)*$"))' "${input_file}")"
+            jq -e '.openapi' "${input_file}" >"${openapi_file}"
+            jq -er '.theme' "${input_file}" >"${theme_file}"
+
+            HITCH_CI_OPENAPI_PATH="${openapi_file}" \
+              HITCH_CI_THEME_PATH="${theme_file}" \
+              pnpm --dir "${source_directory}" exec applet build
+
+            dist_directory="${source_directory}/.hitch/dist"
+            built_code="$(jq -er '.code' "${dist_directory}/manifest.json")"
+            if [[ "${built_code}" != "${applet_code}" ]]; then
+              echo "Built applet code ${built_code} does not match ${applet_code}." >&2
+              exit 1
+            fi
+            find "${dist_directory}" -type f -printf '%P\0' |
+              sort -z |
+              tar --create --gzip --file "${bundle_file}" \
+                --directory "${dist_directory}" --null --files-from=-
+
+            if [[ "$(production_sha)" != "${GITHUB_SHA}" ]]; then
+              echo "A newer production commit exists. Skip this stale deployment."
+              exit 0
+            fi
+
+            curl --fail-with-body --silent --show-error \
+              --header "Authorization: Bearer $(oidc_token)" \
+              --form "manifest=@${dist_directory}/manifest.json;type=application/json" \
+              --form "bundle=@${bundle_file};type=application/gzip" \
+              --form "source_directory=${source_directory}" \
+              "${hitch_url}/api/ci/v1/applets/${applet_code}/releases" | jq .
+
+            index=$((index + 1))
+          done
