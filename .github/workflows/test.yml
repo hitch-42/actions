@@ -20,4 +20,4 @@ jobs:
         working-directory: test-fixture
         run: |
           corepack enable
-          pnpm dlx --allow-build=esbuild --allow-build=workerd @hitch42/applet@0.1.0-beta.3 bootstrap --no-install
+          pnpm dlx --allow-build=esbuild --allow-build=workerd @hitch42/applet@0.1.0-beta.3 bootstrap
