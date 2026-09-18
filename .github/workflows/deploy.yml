@@ -74,49 +74,36 @@ jobs:
             exit 1
           fi
 
+          input_file="${RUNNER_TEMP}/hitch-inputs.json"
+          openapi_file="${RUNNER_TEMP}/hitch-openapi.json"
+          theme_file="${RUNNER_TEMP}/hitch-theme.css"
+          input_status="$(
+            curl --silent --show-error --request POST \
+              --header "Authorization: Bearer $(oidc_token)" \
+              --output "${input_file}" \
+              --write-out '%{http_code}' \
+              "${hitch_url}/api/ci/v1/build-inputs"
+          )"
+          if [[ "${input_status}" != "200" ]]; then
+            cat "${input_file}" >&2
+            exit 1
+          fi
+          jq -e '.openapi' "${input_file}" >"${openapi_file}"
+          jq -er '.theme' "${input_file}" >"${theme_file}"
+
           index=0
           for applet_manifest in "${applet_manifests[@]}"; do
             source_directory="${applet_manifest%/applet.manifest.ts}"
-            input_file="${RUNNER_TEMP}/hitch-inputs-${index}.json"
-            openapi_file="${RUNNER_TEMP}/hitch-openapi-${index}.json"
-            theme_file="${RUNNER_TEMP}/hitch-theme-${index}.css"
             bundle_file="${RUNNER_TEMP}/hitch-bundle-${index}.tar.gz"
-
-            input_status="$(
-              jq -n --arg source_directory "${source_directory}" '{source_directory: $source_directory}' |
-                curl --silent --show-error \
-                  --header "Authorization: Bearer $(oidc_token)" \
-                  --header "Content-Type: application/json" \
-                  --data-binary @- \
-                  --output "${input_file}" \
-                  --write-out '%{http_code}' \
-                  "${hitch_url}/api/ci/v1/build-inputs"
-            )"
-            if [[ "${input_status}" == "404" ]] &&
-              [[ "$(jq -r '.code // empty' "${input_file}")" == "github_source_not_linked" ]]; then
-              echo "Skip ${source_directory}: it is not linked to a Hitch applet."
-              index=$((index + 1))
-              continue
-            fi
-            if [[ "${input_status}" != "200" ]]; then
-              cat "${input_file}" >&2
-              exit 1
-            fi
-
-            applet_code="$(jq -er '.code | select(test("^[a-z][a-z0-9]*(_[a-z0-9]+)*$"))' "${input_file}")"
-            jq -e '.openapi' "${input_file}" >"${openapi_file}"
-            jq -er '.theme' "${input_file}" >"${theme_file}"
 
             HITCH_CI_OPENAPI_PATH="${openapi_file}" \
               HITCH_CI_THEME_PATH="${theme_file}" \
               pnpm --dir "${source_directory}" exec applet build
 
             dist_directory="${source_directory}/.hitch/dist"
-            built_code="$(jq -er '.code' "${dist_directory}/manifest.json")"
-            if [[ "${built_code}" != "${applet_code}" ]]; then
-              echo "Built applet code ${built_code} does not match ${applet_code}." >&2
-              exit 1
-            fi
+            applet_code="$(
+              jq -er '.code | select(test("^[a-z][a-z0-9]*(_[a-z0-9]+)*$"))' "${dist_directory}/manifest.json"
+            )"
             find "${dist_directory}" -type f -printf '%P\0' |
               sort -z |
               tar --create --gzip --file "${bundle_file}" \
@@ -131,7 +118,7 @@ jobs:
               --header "Authorization: Bearer $(oidc_token)" \
               --form "manifest=@${dist_directory}/manifest.json;type=application/json" \
               --form "bundle=@${bundle_file};type=application/gzip" \
-              --form "source_directory=${source_directory}" \
+              --form-string "source_directory=${source_directory}" \
               "${hitch_url}/api/ci/v1/applets/${applet_code}/releases" | jq .
 
             index=$((index + 1))
