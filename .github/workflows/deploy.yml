@@ -14,6 +14,8 @@ permissions: {}
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    # Cancellation is the only guard against a stale release: a newer push
+    # cancels this run before it can finish another build and upload.
     concurrency:
       group: hitch-applets-${{ github.repository }}-${{ github.ref }}
       cancel-in-progress: true
@@ -39,87 +41,9 @@ jobs:
           )"
           corepack enable
           pnpm dlx --allow-build=esbuild --allow-build=workerd "${sdk}" bootstrap
-      - name: Build and deploy applets
-        shell: bash
+      # The SDK reads the job's OIDC token, fetches the build inputs, builds
+      # every applet under applets/, and uploads each release.
+      - name: Deploy applets
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          HITCH_URL: ${{ inputs.hitch_url }}
-        run: |
-          set -euo pipefail
-
-          hitch_url="${HITCH_URL%/}"
-
-          oidc_token() {
-            curl --fail-with-body --silent --show-error --get \
-              --header "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              --data-urlencode "audience=${hitch_url}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}" | jq -er '.value'
-          }
-
-          production_sha() {
-            encoded_ref="$(jq -rn --arg ref "${GITHUB_REF_NAME}" '$ref | @uri')"
-            curl --fail-with-body --silent --show-error \
-              --header "Authorization: Bearer ${GITHUB_TOKEN}" \
-              --header "Accept: application/vnd.github+json" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/commits/${encoded_ref}" |
-              jq -er '.sha'
-          }
-
-          mapfile -d '' applet_manifests < <(
-            find applets -mindepth 2 -maxdepth 2 -type f -name applet.manifest.ts -print0 | sort -z
-          )
-          if (( ${#applet_manifests[@]} == 0 )); then
-            echo "No applets were found under applets/." >&2
-            exit 1
-          fi
-
-          input_file="${RUNNER_TEMP}/hitch-inputs.json"
-          openapi_file="${RUNNER_TEMP}/hitch-openapi.json"
-          theme_file="${RUNNER_TEMP}/hitch-theme.css"
-          input_status="$(
-            curl --silent --show-error --request POST \
-              --header "Authorization: Bearer $(oidc_token)" \
-              --output "${input_file}" \
-              --write-out '%{http_code}' \
-              "${hitch_url}/api/ci/v1/build-inputs"
-          )"
-          if [[ "${input_status}" != "200" ]]; then
-            cat "${input_file}" >&2
-            exit 1
-          fi
-          jq -e '.openapi' "${input_file}" >"${openapi_file}"
-          jq -er '.theme' "${input_file}" >"${theme_file}"
-
-          index=0
-          for applet_manifest in "${applet_manifests[@]}"; do
-            source_directory="${applet_manifest%/applet.manifest.ts}"
-            bundle_file="${RUNNER_TEMP}/hitch-bundle-${index}.tar.gz"
-
-            HITCH_CI_OPENAPI_PATH="${openapi_file}" \
-              HITCH_CI_THEME_PATH="${theme_file}" \
-              pnpm --dir "${source_directory}" exec applet build
-
-            dist_directory="${source_directory}/.hitch/dist"
-            applet_code="$(
-              jq -er '.code | select(test("^[a-z][a-z0-9]*(_[a-z0-9]+)*$"))' "${dist_directory}/manifest.json"
-            )"
-            find "${dist_directory}" -type f -printf '%P\0' |
-              sort -z |
-              tar --create --gzip --file "${bundle_file}" \
-                --directory "${dist_directory}" --null --files-from=-
-
-            if [[ "$(production_sha)" != "${GITHUB_SHA}" ]]; then
-              echo "A newer production commit exists. Skip this stale deployment."
-              exit 0
-            fi
-
-            curl --fail-with-body --silent --show-error \
-              --header "Authorization: Bearer $(oidc_token)" \
-              --form "manifest=@${dist_directory}/manifest.json;type=application/json" \
-              --form "bundle=@${bundle_file};type=application/gzip" \
-              --form-string "source_directory=${source_directory}" \
-              "${hitch_url}/api/ci/v1/applets/${applet_code}/releases" | jq .
-
-            index=$((index + 1))
-          done
+          HITCH_API_URL: ${{ inputs.hitch_url }}
+        run: pnpm exec applet deploy
