@@ -28,7 +28,18 @@ jobs:
         with:
           node-version: "24"
           package-manager-cache: false
-      - name: Restore workspace support
+      # The SDK pin decides what pnpm downloads; the lockfile is generated.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/node/corepack
+            ~/.cache/pnpm/dlx
+            ~/.local/share/pnpm/store
+          key: hitch-pnpm-${{ runner.os }}-${{ hashFiles('hitch.config.ts') }}
+          restore-keys: hitch-pnpm-${{ runner.os }}-
+      - name: Deploy applets
+        env:
+          HITCH_API_URL: ${{ inputs.hitch_url }}
         run: |
           sdk="$(
             node --input-type=module <<'NODE'
@@ -40,10 +51,4 @@ jobs:
           NODE
           )"
           corepack enable
-          pnpm dlx --allow-build=esbuild --allow-build=workerd "${sdk}" bootstrap
-      # The SDK reads the job's OIDC token, fetches the build inputs, builds
-      # every applet under applets/, and uploads each release.
-      - name: Deploy applets
-        env:
-          HITCH_API_URL: ${{ inputs.hitch_url }}
-        run: pnpm exec applet deploy
+          pnpm dlx --allow-build=esbuild --allow-build=workerd "${sdk}" deploy
