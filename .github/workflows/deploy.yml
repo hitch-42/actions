@@ -51,4 +51,4 @@ jobs:
           NODE
           )"
           corepack enable
-          pnpm dlx --allow-build=esbuild --allow-build=workerd "${sdk}" deploy
+          pnpm dlx "${sdk}" deploy
