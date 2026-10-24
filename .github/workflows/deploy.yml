@@ -40,6 +40,8 @@ jobs:
       - name: Deploy applets
         env:
           HITCH_API_URL: ${{ inputs.hitch_url }}
+          # Parallel Vite builds exhaust the runner's memory.
+          APPLET_BUILD_CONCURRENCY: "2"
         run: |
           sdk="$(
             node --input-type=module <<'NODE'

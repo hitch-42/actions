@@ -7,8 +7,9 @@ commit SHA. The workflow runs `applet deploy` through the SDK version pinned in
 `hitch.config.ts`, and caches the pnpm store between runs. The SDK reads the
 job's OIDC token, skips applets whose folder and shared files match the source
 of their current release (from CI or a local `applet deploy`), then installs
-once and builds and uploads the rest concurrently. The workflow requires no
-Hitch repository secret.
+once and builds and uploads the rest concurrently. The workflow sets
+`APPLET_BUILD_CONCURRENCY` to 2 so parallel builds do not exhaust the runner's
+memory. The workflow requires no Hitch repository secret.
 
 Existing workspaces must remove `push.paths` from `.github/workflows/hitch.yml`
 so changes to shared files trigger the job. Bootstrap preserves existing
